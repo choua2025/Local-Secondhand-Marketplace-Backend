@@ -1,0 +1,118 @@
+name: CI/CD
+
+# CI on every push and PR; the image is built on all of them (to validate the
+# Dockerfile) but only PUSHED to the registry from main and version tags.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch/PR cancels the older, still-running one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Typecheck, then the integration suite against a real Postgres, then a
+  # production build.
+  # ───────────────────────────────────────────────────────────────────────────
+  server:
+    name: typecheck · test · build
+    runs-on: ubuntu-latest
+
+    # The suite talks to a real database — nothing is mocked. This service is it.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        # Don't start the job's steps until Postgres actually accepts connections.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The test harness appends "_test" to this DB name and creates/migrates it
+      # itself (see test/setup/globalSetup.ts). It only needs a reachable server
+      # and a role that can CREATE DATABASE — the default postgres superuser.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/marketplace
+      JWT_SECRET: ci-test-secret-not-used-in-production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # ci, not install: fails if package-lock.json is out of sync, which is
+      # exactly the guarantee we want in CI.
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Build the server image. Runs on every trigger (so a PR proves the image
+  # still builds), but only logs in and PUSHES from main or a v* tag.
+  # ───────────────────────────────────────────────────────────────────────────
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    needs: [server]
+    permissions:
+      contents: read
+      packages: write # required to push to GHCR with GITHUB_TOKEN
+
+    # Push on main or a v* tag, never on a pull request. Computed once here and
+    # reused by the login and push steps below.
+    env:
+      SHOULD_PUSH: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        if: env.SHOULD_PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Generates tags/labels: :sha-xxxxxxx always, :latest on main, and the
+      # semver (e.g. :1.2.3, :1.2) on a v* tag. Also lowercases the image name.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ env.SHOULD_PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache image layers between runs via the GitHub Actions cache.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
