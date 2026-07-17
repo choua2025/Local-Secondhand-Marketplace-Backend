@@ -1,0 +1,95 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploys the API and its Postgres together. From the Render dashboard:
+# New → Blueprint → pick this repo. Render reads this file and creates both.
+#
+# Both are on the free plan so this cannot generate a surprise bill. Two things
+# to know before relying on it:
+#   - A free web service spins down after ~15 minutes idle; the next request
+#     pays a cold start of roughly 30-60s.
+#   - A FREE POSTGRES IS DELETED AFTER 30 DAYS. Move to basic-256mb before then
+#     or you lose the data. See the plan: lines below.
+
+databases:
+  - name: marketplace-db
+    databaseName: secondhand_marketplace
+    user: marketplace
+    region: singapore # must match the web service, or the private network is unavailable
+    plan: free # -> basic-256mb for a database that survives past 30 days
+
+services:
+  - type: web
+    name: marketplace-api
+    runtime: docker
+    region: singapore # must match the database above
+    plan: free # -> starter to stop the service spinning down when idle
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    # Hits /api/health, which runs SELECT 1 against the pool — so a green check
+    # means Postgres is reachable too, not just that Express is listening.
+    # Render holds the old version until this passes, giving zero-downtime deploys.
+    healthCheckPath: /api/health
+
+    envVars:
+      # The INTERNAL connection string: it resolves over Render's private
+      # network because the database sits in the same region. It never crosses
+      # the public internet, which is why DATABASE_SSL stays unset below.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: marketplace-db
+          property: connectionString
+
+      # Render generates a strong random value on first deploy and never shows
+      # it in this file. Deliberate: the old secret leaked publicly on GitHub,
+      # so it must not carry over. Existing JWTs stop validating, which is the
+      # entire point — tokens signed with the leaked secret are forgeable.
+      - key: JWT_SECRET
+        generateValue: true
+
+      - key: PORT
+        value: 4000 # matches EXPOSE 4000 in the Dockerfile
+
+      # Render terminates TLS at its load balancer and forwards one hop, so the
+      # real client IP is in X-Forwarded-For. Without this, express-rate-limit
+      # keys every request to the proxy's IP and all users share one bucket —
+      # one noisy client would rate-limit everybody.
+      - key: TRUST_PROXY
+        value: 1
+
+      - key: NODE_ENV
+        value: production
+
+      # DATABASE_SSL is intentionally absent. The private-network connection
+      # above needs no TLS. If you ever point DATABASE_URL at an EXTERNAL host,
+      # you must set this — sending the password unencrypted over the internet
+      # would leak it. Use `no-verify` for Render's external URL (its cert does
+      # not pass strict verification); `require` for a provider with a publicly
+      # trusted cert.
+
+      # sync: false = Render prompts for these once and stores them encrypted.
+      # They stay out of git, which is how the .env leak happened.
+      - key: CLIENT_ORIGIN # your deployed frontend origin, e.g. https://foo.onrender.com
+        sync: false # comma-separated for several; no trailing slash
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+
+      # Optional — password-reset email. initMailerFromEnv() installs a real SMTP
+      # transport only when SMTP_HOST is present; with no transport in
+      # production, reset mail is silently dropped. Uncomment to enable.
+      # - key: SMTP_HOST
+      #   sync: false
+      # - key: SMTP_PORT
+      #   value: 587
+      # - key: SMTP_SECURE
+      #   value: false
+      # - key: SMTP_USER
+      #   sync: false
+      # - key: SMTP_PASS
+      #   sync: false
+      # - key: MAIL_FROM
+      #   sync: false
