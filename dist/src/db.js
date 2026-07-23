@@ -24,6 +24,37 @@ if (!connectionString) {
     throw new Error('DATABASE_URL is not set. Copy server/.env.example to server/.env.');
 }
 /**
+ * In production, a DATABASE_URL pointing at localhost is always a
+ * misconfiguration: the database lives in another container or another host, so
+ * nothing is listening on the app's own loopback interface. Left to itself, pg
+ * reports this as ECONNREFUSED 127.0.0.1:5432, which says nothing about the
+ * cause — the usual culprit is a local .env value pasted into a hosting
+ * dashboard. Failing here instead names the actual problem.
+ */
+function assertRemoteHostInProduction(url) {
+    if (process.env.NODE_ENV !== 'production')
+        return;
+    let hostname;
+    try {
+        hostname = new URL(url).hostname;
+    }
+    catch {
+        // Not URL-shaped (e.g. a libpq "host=... port=..." DSN). Nothing to check.
+        return;
+    }
+    // An empty hostname means a Unix socket / implicit localhost.
+    const loopback = ['localhost', '127.0.0.1', '::1', '[::1]', ''];
+    if (!loopback.includes(hostname.toLowerCase()))
+        return;
+    throw new Error(`DATABASE_URL points at "${hostname || 'localhost'}", but NODE_ENV is production. ` +
+        'A deployed app cannot reach a database on its own loopback interface — this is ' +
+        'usually a local .env value copied into the host\'s environment settings. Set ' +
+        'DATABASE_URL to the managed database\'s own connection string. On Render, the ' +
+        'blueprint wires it automatically via fromDatabase; if the service was created by ' +
+        'hand instead, delete the DATABASE_URL you entered and add it from the database ' +
+        "(Environment → Add from database), or redeploy the repo as a Blueprint.");
+}
+/**
  * TLS for the database connection, chosen by DATABASE_SSL:
  *
  *   unset / 'false' / 'disable' — no TLS. The right answer for a local Postgres
@@ -48,6 +79,7 @@ function sslConfig() {
         return { rejectUnauthorized: false };
     return { rejectUnauthorized: true };
 }
+assertRemoteHostInProduction(connectionString);
 exports.pool = new pg_1.Pool({
     connectionString,
     ssl: sslConfig(),
