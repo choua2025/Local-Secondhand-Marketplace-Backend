@@ -69,6 +69,11 @@ export function createApp(): Express {
     res.json({ ok: true, db: 'up' });
   });
 
+  app.get('/api/healthz', async (_req: Request, res: Response) => {
+    await pool.query('SELECT 1');
+    res.json({ ok: true, db: 'up', message: 'Health check passed' });
+  });
+
   // Everything past the health check is rate limited. Health is exempt on
   // purpose — load balancers poll it constantly and must never be throttled.
   // The stricter per-endpoint limits (auth, uploads) are layered on inside
