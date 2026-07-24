@@ -1,0 +1,68 @@
+# Backend stack: Postgres + the API (Express + WebSocket).
+#
+#   cp .env.example .env      # then set JWT_SECRET (required)
+#   docker compose up --build
+#
+# The API is then on http://localhost:4000, health at /api/health.
+#
+# This file lives at the root of the backend repo, so it builds the Dockerfile
+# beside it. ${VAR} substitutions are read from .env in this same directory by
+# docker compose; the values become the server's environment directly — no .env
+# file is ever copied into an image.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-secondhand_marketplace}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # The server waits on this before running migrations; see depends_on below.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-secondhand_marketplace}']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    ports:
+      # Exposed for local psql / inspection. Drop this line to keep it internal.
+      - '5432:5432'
+
+  server:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: '4000'
+      # Points at the db service on the compose network — NOT localhost. The app
+      # refuses a localhost DATABASE_URL under NODE_ENV=production on purpose.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-secondhand_marketplace}
+      # No TLS to the in-network Postgres. A managed/remote DB would set 'require'.
+      DATABASE_SSL: ${DATABASE_SSL:-}
+      # One proxy hop is assumed in production; harmless here where there is none.
+      # Set to the real hop count if you put nginx / a cloud LB in front.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      # Required — compose refuses to start without it (see .env.example).
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is not set. Copy .env.example to .env and set it.}
+      # The browser origin(s) of the client, for CORS and reset-link building.
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost:5173}
+      # Optional integrations. Empty = feature off (uploads 503, reset mail not sent).
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@localhost}
+    ports:
+      - '4000:4000'
+
+volumes:
+  db-data:

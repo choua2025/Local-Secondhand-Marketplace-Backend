@@ -46,4 +46,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # Apply any pending migrations (idempotent), then start. If migration fails the
 # container exits non-zero rather than starting against a half-built schema.
-CMD ["sh", "-c", "node dist/scripts/migrate.js && node dist/src/index.js"]
+#
+# `exec` replaces the shell with node so the server runs as PID 1 and receives
+# SIGTERM directly. Without it, sh stays PID 1 and does not forward the signal,
+# so the graceful-shutdown handler in index.ts never runs and the orchestrator
+# SIGKILLs the container instead — dropping in-flight requests and leaking DB
+# connections, which is exactly what that handler exists to prevent.
+CMD ["sh", "-c", "node dist/scripts/migrate.js && exec node dist/src/index.js"]
